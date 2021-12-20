@@ -25,361 +25,164 @@ NULL
 #' @param ... Unused, needed for compatibility with generic.
 #' @examples
 #' if (mariadbHasDefault()) {
-#' con <- dbConnect(RMariaDB::MariaDB(), dbname = "test")
+#'   con <- dbConnect(RMariaDB::MariaDB(), dbname = "test")
 #'
-#' # By default, row names are written in a column to row_names, and
-#' # automatically read back into the row.names()
-#' dbWriteTable(con, "mtcars", mtcars[1:5, ], temporary = TRUE)
-#' dbReadTable(con, "mtcars")
-#' dbReadTable(con, "mtcars", row.names = FALSE)
+#'   # By default, row names are written in a column to row_names, and
+#'   # automatically read back into the row.names()
+#'   dbWriteTable(con, "mtcars", mtcars[1:5, ], temporary = TRUE)
+#'   dbReadTable(con, "mtcars")
+#'   dbReadTable(con, "mtcars", row.names = FALSE)
 #' }
 #' @name mariadb-tables
 NULL
 
-#' @export
-#' @rdname mariadb-tables
-setMethod("dbReadTable", c("MariaDBConnection", "character"),
-  function(conn, name, ..., row.names = FALSE, check.names = TRUE) {
-    row.names <- compatRowNames(row.names)
-
-    if ((!is.logical(row.names) && !is.character(row.names)) || length(row.names) != 1L)  {
-      stopc("`row.names` must be a logical scalar or a string")
-    }
-
-    if (!is.logical(check.names) || length(check.names) != 1L)  {
-      stopc("`check.names` must be a logical scalar")
-    }
-
-    name <- dbQuoteIdentifier(conn, name)
-    out <- dbGetQuery(conn, paste("SELECT * FROM ", name),
-      row.names = row.names)
-
-    if (check.names) {
-      names(out) <- make.names(names(out), unique = TRUE)
-    }
-
-    out
+db_append_table <- function(conn, name, value, warn_factor = TRUE, safe = TRUE, transact = TRUE) {
+  path <- tempfile("RMariaDB", fileext = ".tsv")
+  is_list <- vlapply(value, is.list)
+  colnames <- dbQuoteIdentifier(conn, names(value))
+  if (any(is_list)) {
+    set <- paste0(
+      "SET ",
+      paste0(
+        colnames[is_list], " = UNHEX(@X", which(is_list), ")",
+        collapse = ", "
+      )
+    )
+    colnames[is_list] <- paste0("@X", which(is_list))
+  } else {
+    set <- ""
   }
-)
+  quoted_name <- dbQuoteIdentifier(conn, name)
+  sql <- paste0(
+    "LOAD DATA LOCAL INFILE ", dbQuoteString(conn, path), "\n",
+    "IGNORE\n",
+    "INTO TABLE ", quoted_name, "\n",
+    "CHARACTER SET utf8 \n",
+    "(", paste0(colnames, collapse = ", "), ")",
+    set
+  )
 
-#' @inheritParams DBI::sqlRownamesToColumn
-#' @param overwrite a logical specifying whether to overwrite an existing table
-#'   or not. Its default is `FALSE`.
-#' @param append a logical specifying whether to append to an existing table
-#'   in the DBMS.  If appending, then the table (or temporary table)
-#'   must exist, otherwise an error is reported. Its default is `FALSE`.
-#' @param value A data frame.
-#' @param field.types Optional, overrides default choices of field types,
-#'   derived from the classes of the columns in the data frame.
-#' @param temporary If `TRUE`, creates a temporary table that expires
-#'   when the connection is closed. For `dbRemoveTable()`, only temporary
-#'   tables are considered if this argument is set to `TRUE`.
-#' @export
-#' @rdname mariadb-tables
-setMethod("dbWriteTable", c("MariaDBConnection", "character", "data.frame"),
-  function(conn, name, value, field.types = NULL, row.names = FALSE,
-           overwrite = FALSE, append = FALSE, ...,
-           temporary = FALSE) {
+  file <- file(path, "wb")
+  on.exit(close(file))
 
-    if (!is.data.frame(value))  {
-      stopc("`value` must be data frame")
-    }
+  readr::write_delim(
+    csv_quote(value, warn_factor, conn), file, quote = "none", delim = "\t", na = "\\N",
+    col_names = FALSE
+  )
 
-    row.names <- compatRowNames(row.names)
+  # Close connection manually, unlink when done to save disk space
+  on.exit(unlink(path), add = FALSE)
+  close(file)
 
-    if ((!is.logical(row.names) && !is.character(row.names)) || length(row.names) != 1L)  {
-      stopc("`row.names` must be a logical scalar or a string")
-    }
-    if (!is.logical(overwrite) || length(overwrite) != 1L || is.na(overwrite))  {
-      stopc("`overwrite` must be a logical scalar")
-    }
-    if (!is.logical(append) || length(append) != 1L || is.na(append))  {
-      stopc("`append` must be a logical scalar")
-    }
-    if (!is.logical(temporary) || length(temporary) != 1L)  {
-      stopc("`temporary` must be a logical scalar")
-    }
-    if (overwrite && append) {
-      stopc("overwrite and append cannot both be TRUE")
-    }
-    if (!is.null(field.types) && !(is.character(field.types) && !is.null(names(field.types)) && !anyDuplicated(names(field.types)))) {
-      stopc("`field.types` must be a named character vector with unique names, or NULL")
-    }
-    if (append && !is.null(field.types)) {
-      stopc("Cannot specify `field.types` with `append = TRUE`")
-    }
-
-    need_transaction <- !connection_is_transacting(conn@ptr)
-    if (need_transaction) {
+  if (safe) {
+    if (transact) {
       dbBegin(conn)
-      on.exit(dbRollback(conn))
+      on.exit(dbRollback(conn), add = TRUE)
     }
 
-    if (!temporary) {
-      found <- dbExistsTable(conn, name)
-      if (found && !overwrite && !append) {
-        stop("Table ", name, " exists in database, and both overwrite and",
-          " append are FALSE", call. = FALSE)
+    sql_count <- paste0("SELECT COUNT(*) FROM ", quoted_name)
+    count_before <- dbGetQuery(conn, sql_count)[[1]]
+
+    out <- dbExecute(conn, sql)
+
+    # Some servers don't return a record count here,
+    # need to count manually
+    if (out == 0) {
+      count_after <- dbGetQuery(conn, sql_count)[[1]]
+      out <- as.numeric(count_after - count_before)
+    }
+
+    if (transact) {
+      if (out < nrow(value)) {
+        stopc("Error writing table: sent ", nrow(value), " rows, added ", out, " rows.")
       }
-    } else {
-      found <- FALSE
-    }
-
-    if (overwrite) {
-      dbRemoveTable(conn, name, temporary = temporary, fail_if_missing = FALSE)
-    }
-
-    # dbAppendTable() calls sql_data(), we only need to take care of row names
-    row.names <- compatRowNames(row.names)
-    value <- sqlRownamesToColumn(value, row.names)
-    value <- factor_to_string(value)
-
-    if (!found || overwrite) {
-      if (is.null(field.types)) {
-        combined_field_types <- lapply(value, dbDataType, dbObj = conn)
-      } else {
-        combined_field_types <- rep("", length(value))
-        names(combined_field_types) <- names(value)
-        field_types_idx <- match(names(field.types), names(combined_field_types))
-        stopifnot(!any(is.na(field_types_idx)))
-        combined_field_types[field_types_idx] <- field.types
-        values_idx <- setdiff(seq_along(value), field_types_idx)
-        combined_field_types[values_idx] <- lapply(value[values_idx], dbDataType, dbObj = conn)
-      }
-
-      dbCreateTable(
-        conn = conn,
-        name = name,
-        fields = combined_field_types,
-        temporary = temporary
-      )
-    }
-
-    if (nrow(value) > 0) {
-      dbAppendTable(
-        conn = conn,
-        name = name,
-        value = value
-      )
-    }
-
-    if (need_transaction) {
-      on.exit(NULL)
       dbCommit(conn)
     }
 
-    invisible(TRUE)
-  }
-)
+    # Manual cleanup
+    unlink(path)
+    on.exit(NULL, add = FALSE)
 
-setMethod("sqlData", "MariaDBConnection", function(con, value, row.names = FALSE, ...) {
-  value <- sql_data(value, con, row.names)
-  value <- quote_string(value, con)
-
-  value
-})
-
-#' @export
-#' @rdname mariadb-tables
-#' @importFrom utils read.table
-#' @param sep field separator character
-#' @param eol End-of-line separator
-#' @param skip number of lines to skip before reading data in the input file.
-#' @param quote the quote character used in the input file (defaults to
-#'    `\"`.)
-#' @param header logical, does the input file have a header line? Default is the
-#'    same heuristic used by `read.table()`, i.e., `TRUE` if the first
-#'    line has one fewer column that the second line.
-#' @param nrows number of lines to rows to import using `read.table` from
-#'   the input file to create the proper table definition. Default is 50.
-setMethod("dbWriteTable", c("MariaDBConnection", "character", "character"),
-  function(conn, name, value, field.types = NULL, overwrite = FALSE,
-           append = FALSE, header = TRUE, row.names = FALSE, nrows = 50,
-           sep = ",", eol = "\n", skip = 0, quote = '"', temporary = FALSE,
-           ...) {
-
-    if (overwrite && append)
-      stop("overwrite and append cannot both be TRUE", call. = FALSE)
-
-    found <- dbExistsTable(conn, name)
-    if (found && !overwrite && !append) {
-      stop("Table ", name, " exists in database, and both overwrite and",
-        " append are FALSE", call. = FALSE)
-    }
-    if (found && overwrite) {
-      dbRemoveTable(conn, name)
-    }
-    if (!found && append) {
-      stop("Table ", name, " does not exists when appending")
-    }
-
-    if (!found || overwrite) {
-      if (is.null(field.types)) {
-        # Initialise table with first `nrows` lines
-        d <- read.table(value, sep = sep, header = header, skip = skip,
-          nrows = nrows, na.strings = "\\N", comment.char = "",
-          stringsAsFactors = FALSE)
-        field.types <- vapply(d, dbDataType, dbObj = conn,
-          FUN.VALUE = character(1))
-      }
-
-      sql <- sqlCreateTable(conn, name, field.types,
-        row.names = row.names, temporary = temporary)
-      dbExecute(conn, sql)
-    }
-
-    path <- normalizePath(value, winslash = "/", mustWork = TRUE)
-    sql <- paste0(
-      "LOAD DATA LOCAL INFILE ", dbQuoteString(conn, path), "\n",
-      "INTO TABLE ", dbQuoteIdentifier(conn, name), "\n",
-      "FIELDS TERMINATED BY ", dbQuoteString(conn, sep), "\n",
-      "OPTIONALLY ENCLOSED BY ", dbQuoteString(conn, quote), "\n",
-      "LINES TERMINATED BY ", dbQuoteString(conn, eol), "\n",
-      "IGNORE ", skip + as.integer(header), " LINES")
-
+    out
+  } else {
     dbExecute(conn, sql)
-
-    invisible(TRUE)
   }
-)
+}
 
-#' @export
-#' @rdname mariadb-tables
-setMethod("dbListTables", "MariaDBConnection", function(conn, ...) {
-  # DATABASE(): https://stackoverflow.com/a/8096574/946850
-  dbGetQuery(
-    conn,
-    paste0(
-      "SELECT table_name FROM INFORMATION_SCHEMA.tables\n",
-      "WHERE table_schema = DATABASE()"
-    )
-  )[[1]]
-})
+csv_quote <- function(x, warn_factor, conn) {
+  old <- options(digits.secs = 6)
+  on.exit(options(old))
 
+  x[] <- lapply(x, csv_quote_one, conn)
+  factor_to_string(x, warn = warn_factor)
+}
 
-#' @export
-#' @inheritParams DBI::dbListObjects
-#' @rdname mariadb-tables
-setMethod("dbListObjects", c("MariaDBConnection", "ANY"), function(conn, prefix = NULL, ...) {
-  query <- NULL
-  if (is.null(prefix)) {
-    # DATABASE(): https://stackoverflow.com/a/8096574/946850
-    query <- paste0(
-      "SELECT NULL AS `schema`, table_name AS `table` FROM INFORMATION_SCHEMA.tables\n",
-      "WHERE table_schema = DATABASE()\n",
-      "UNION ALL\n",
-      "SELECT DISTINCT table_schema AS `schema`, NULL AS `table` FROM INFORMATION_SCHEMA.tables"
-    )
-  } else {
-    unquoted <- dbUnquoteIdentifier(conn, prefix)
-    is_prefix <- vlapply(unquoted, function(x) { "schema" %in% names(x@name) && !("table" %in% names(x@name)) })
-    schemas <- vcapply(unquoted[is_prefix], function(x) x@name[["schema"]])
-    if (length(schemas) > 0) {
-      schema_strings <- dbQuoteString(conn, schemas)
-      query <- paste0(
-        "SELECT table_schema AS `schema`, table_name AS `table` FROM INFORMATION_SCHEMA.tables\n",
-        "WHERE ",
-        "(table_schema IN (", paste(schema_strings, collapse = ", "), "))"
-      )
+csv_quote_one <- function(x, conn) {
+  if (inherits(x, "AsIs")) {
+    class(x) <- setdiff(class(x), "AsIs")
+  }
+
+  if (is.factor(x)) {
+    levels(x) <- csv_quote_char(levels(x))
+  } else if (is.character(x)) {
+    x <- csv_quote_char(x)
+  } else if (is.integer(x)) {
+    x_orig <- x
+    x <- as.character(x)
+    # Failure to load BIT(1) columns with a verbatim 0 (???)
+    # https://stackoverflow.com/a/17836602/946850
+    x[!is.na(x_orig) & x_orig == 0] <- ""
+  } else if (is.integer64(x)) {
+    x_orig <- x
+    x <- as.character(x)
+    # Failure to load BIT(1) columns with a verbatim 0 (???)
+    # https://stackoverflow.com/a/17836602/946850
+    x[!is.na(x_orig) & x_orig == 0] <- ""
+  } else if (is.numeric(x)) {
+    x_orig <- x
+    if (all_integerish(x)) {
+      x <- formatC(x, format = "d")
+    } else {
+      # https://dev.mysql.com/doc/refman/5.7/en/number-literals.html
+      x <- formatC(x, digits = 17, format = "E")
     }
-  }
-
-  if (is.null(query)) {
-    res <- data.frame(schema = character(), table = character(), stringsAsFactors = FALSE)
+    x[is.na(x_orig) | is.infinite(x_orig)] <- NA_character_
+  } else if (is.logical(x)) {
+    x <- as.character(as.integer(x))
+  } else if (inherits(x, "Date")) {
+    x <- as.character(x)
+  } else if (inherits(x, "difftime")) {
+    x <- hms::as_hms(x)
+    x <- as.character(x)
+  } else if (inherits(x, "POSIXt")) {
+    x <- format(x, format = "%Y-%m-%dT%H:%M:%OS", tz = conn@timezone)
+  } else if (inherits(x, "list")) {
+    x_orig <- x
+    x <- vcapply(x, function(x) paste(format(x), collapse = ""))
+    x[vlapply(x_orig, is.null)] <- NA_character_
   } else {
-    res <- dbGetQuery(conn, query)
+    stop("NYI: ", paste(class(x), collapse = "/"), call. = FALSE)
   }
 
-  is_prefix <- !is.na(res$schema) & is.na(res$table)
-  tables <- Map(res$schema, res$table, f = as_table)
+  x
+}
 
-  ret <- data.frame(
-    table = I(unname(tables)),
-    is_prefix = is_prefix,
-    stringsAsFactors = FALSE
-  )
-  ret
-})
+csv_quote_char <- function(x) {
+  x <- enc2utf8(x)
+  x <- gsub("\\", "\\\\", x, fixed = TRUE)
+  x <- gsub("\t", "\\t", x, fixed = TRUE)
+  x <- gsub("\r", "\\r", x, fixed = TRUE)
+  x <- gsub("\n", "\\n", x, fixed = TRUE)
+  x
+}
 
-#' @export
-#' @rdname mariadb-tables
-setMethod("dbExistsTable", c("MariaDBConnection", "character"),
-  function(conn, name, ...) {
-    stopifnot(length(name) == 1L)
-    if (!dbIsValid(conn)) {
-      stopc("Invalid connection")
-    }
-    tryCatch({
-      dbGetQuery(conn, paste0(
-        "SELECT NULL FROM ", dbQuoteIdentifier(conn, name), " WHERE FALSE"
-      ))
-      TRUE
-    }, error = function(...) {
-      FALSE
-    })
+all_integerish <- function(x) {
+  x <- x[!is.na(x)]
+  if (any(is.infinite(x))) {
+    return(FALSE)
   }
-)
-
-#' @export
-#' @rdname mariadb-tables
-#' @param fail_if_missing If `FALSE`, `dbRemoveTable()` succeeds if the
-#'   table doesn't exist.
-setMethod("dbRemoveTable", c("MariaDBConnection", "character"),
-  function(conn, name, ..., temporary = FALSE, fail_if_missing = TRUE) {
-    extra <- list(...)
-
-    name <- dbQuoteIdentifier(conn, name)
-    dbExecute(
-      conn,
-      paste0(
-        "DROP ",
-        if (temporary) "TEMPORARY ",
-        "TABLE ",
-        if (!fail_if_missing) "IF EXISTS ",
-        name
-      )
-    )
-    invisible(TRUE)
-  }
-)
-
-#' Determine the SQL Data Type of an S object
-#'
-#' This method is a straight-forward implementation of the corresponding
-#' generic function.
-#'
-#' @param dbObj A [MariaDBDriver-class] or [MariaDBConnection-class] object.
-#' @param obj R/S-Plus object whose SQL type we want to determine.
-#' @param \dots any other parameters that individual methods may need.
-#' @export
-#' @rdname dbDataType
-#' @examples
-#' dbDataType(RMariaDB::MariaDB(), "a")
-#' dbDataType(RMariaDB::MariaDB(), 1:3)
-#' dbDataType(RMariaDB::MariaDB(), 2.5)
-setMethod("dbDataType", "MariaDBConnection", function(dbObj, obj, ...) {
-  dbDataType(MariaDB(), obj, ...)
-})
-
-#' @export
-#' @rdname dbDataType
-setMethod("dbDataType", "MariaDBDriver", function(dbObj, obj, ...) {
-  if (is.factor(obj)) return(get_char_type(levels(obj)))
-  if (inherits(obj, "POSIXct")) return("DATETIME(6)")
-  if (inherits(obj, "Date")) return("DATE")
-  if (inherits(obj, "difftime")) return("TIME(6)")
-  if (inherits(obj, "integer64")) return("BIGINT")
-  if (is.data.frame(obj)) return(callNextMethod(dbObj, obj))
-
-  switch(typeof(obj),
-    logical = "TINYINT", # works better than BIT(1), https://stackoverflow.com/q/289727/946850
-    integer = "INTEGER",
-    double = "DOUBLE",
-    character = get_char_type(obj),
-    list = "BLOB",
-    stop("Unsupported type", call. = FALSE)
-  )
-})
+  all(x >= -2147483647) && all(x <= 2147483647) && all(x == as.integer(x))
+}
 
 get_char_type <- function(x) {
   width <- max(nchar(enc2utf8(x)), 1, na.rm = TRUE)

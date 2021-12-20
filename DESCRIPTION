@@ -1,6 +1,6 @@
 Package: RMariaDB
-Title: Database Interface and 'MariaDB' Driver
-Version: 1.1.2
+Title: Database Interface and MariaDB Driver
+Version: 1.2.1
 Authors@R: 
     c(person(given = "Kirill",
              family = "M\u00fcller",
@@ -27,8 +27,8 @@ Authors@R:
              role = "fnd"),
       person(given = "RStudio",
              role = "cph"))
-Description: Implements a 'DBI'-compliant interface to 'MariaDB'
-    (<https://mariadb.org/>) and 'MySQL' (<https://www.mysql.com/>)
+Description: Implements a DBI-compliant interface to MariaDB
+    (<https://mariadb.org/>) and MySQL (<https://www.mysql.com/>)
     databases.
 License: MIT + file LICENSE
 URL: https://rmariadb.r-dbi.org,
@@ -39,14 +39,16 @@ Depends:
     R (>= 2.8.0)
 Imports: 
     bit64,
+    blob,
     DBI (>= 1.1.0),
     hms (>= 0.5.0),
     lubridate,
     methods,
-    Rcpp (>= 0.12.4)
+    Rcpp (>= 0.12.4),
+    rlang
 Suggests: 
-    covr,
     DBItest (>= 1.7.0),
+    readr,
     rprojroot,
     testthat,
     withr
@@ -56,7 +58,7 @@ LinkingTo:
 Encoding: UTF-8
 NeedsCompilation: yes
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.1.1.9001
+RoxygenNote: 7.1.2
 SystemRequirements: libmariadb-client-lgpl-dev or
     libmariadb-dev or libmysqlclient-dev, with libssl-dev (deb),
     mariadb-connector-c-devel or mariadb-devel (rpm),
@@ -65,17 +67,59 @@ Collate:
     'MariaDBConnection.R'
     'MariaDBDriver.R'
     'MariaDBResult.R'
-    'RMariaDB.R'
+    'RMariaDB-package.R'
     'RcppExports.R'
     'coerce.R'
+    'compatRowNames.R'
     'connect.R'
+    'dbAppendTable_MariaDBConnection.R'
+    'dbBegin_MariaDBConnection.R'
+    'dbBind_MariaDBResult.R'
+    'dbClearResult_MariaDBResult.R'
+    'dbColumnInfo_MariaDBResult.R'
+    'dbCommit_MariaDBConnection.R'
+    'dbConnect_MariaDBDriver.R'
+    'dbDataType_MariaDBConnection.R'
+    'dbDataType_MariaDBDriver.R'
+    'dbDisconnect_MariaDBConnection.R'
+    'dbExistsTable_MariaDBConnection_character.R'
+    'dbFetch_MariaDBResult.R'
+    'dbGetInfo_MariaDBConnection.R'
+    'dbGetInfo_MariaDBDriver.R'
+    'dbGetRowCount_MariaDBResult.R'
+    'dbGetRowsAffected_MariaDBResult.R'
+    'dbGetStatement_MariaDBResult.R'
+    'dbHasCompleted_MariaDBResult.R'
+    'dbIsValid_MariaDBConnection.R'
+    'dbIsValid_MariaDBDriver.R'
+    'dbIsValid_MariaDBResult.R'
+    'dbListObjects_MariaDBConnection_ANY.R'
+    'dbListTables_MariaDBConnection.R'
+    'dbQuoteIdentifier_MariaDBConnection_Id.R'
+    'dbQuoteIdentifier_MariaDBConnection_SQL.R'
+    'dbQuoteIdentifier_MariaDBConnection_character.R'
+    'dbQuoteLiteral_MariaDBConnection.R'
+    'dbQuoteString_MariaDBConnection_SQL.R'
+    'dbQuoteString_MariaDBConnection_character.R'
+    'dbReadTable_MariaDBConnection_character.R'
+    'dbRemoveTable_MariaDBConnection_character.R'
+    'dbRollback_MariaDBConnection.R'
+    'dbSendQuery_MariaDBConnection_character.R'
+    'dbSendStatement_MariaDBConnection_character.R'
+    'dbUnloadDriver_MariaDBDriver.R'
+    'dbUnquoteIdentifier_MariaDBConnection_SQL.R'
+    'dbWriteTable_MariaDBConnection_character_character.R'
+    'dbWriteTable_MariaDBConnection_character_data.frame.R'
     'default.R'
     'export.R'
     'names.R'
     'query.R'
     'quote.R'
-    'rownames.R'
+    'show_MariaDBConnection.R'
+    'sqlData_MariaDBConnection.R'
     'table.R'
     'transaction.R'
     'utils.R'
     'zzz.R'
+Config/autostyle/scope: line_breaks
+Config/autostyle/strict: false
